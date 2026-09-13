@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String
+from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
@@ -48,6 +48,31 @@ class Audit(Base, TimestampMixin):
         nullable=True,
     )
 
+    benchmark_profile: Mapped[Optional[str]] = mapped_column(
+        String(80),
+        nullable=True,
+    )
+
+    kubernetes_version: Mapped[Optional[str]] = mapped_column(
+        String(80),
+        nullable=True,
+    )
+
+    kubernetes_distribution: Mapped[Optional[str]] = mapped_column(
+        String(80),
+        nullable=True,
+    )
+
+    kube_bench_version: Mapped[Optional[str]] = mapped_column(
+        String(80),
+        nullable=True,
+    )
+
+    audit_scope: Mapped[Optional[str]] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+
     started_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -55,6 +80,16 @@ class Audit(Base, TimestampMixin):
 
     finished_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
+        nullable=True,
+    )
+
+    duration_seconds: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    failure_reason: Mapped[Optional[str]] = mapped_column(
+        Text,
         nullable=True,
     )
 

@@ -1,7 +1,7 @@
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr
-
+from pydantic import BaseModel, EmailStr, Field
+from app.security.passwords import MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH
 
 class UserRead(BaseModel):
     id: int
@@ -19,5 +19,8 @@ class UserRead(BaseModel):
 class UserCreate(BaseModel):
     full_name: str
     email: EmailStr
-    password: str
+    password: str = Field(
+        min_length=MIN_PASSWORD_LENGTH,
+        max_length=MAX_PASSWORD_LENGTH,
+    )
     role: str = "SECURITY"

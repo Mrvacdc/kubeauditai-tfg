@@ -9,6 +9,10 @@ class ClusterCreate(BaseModel):
     description: Optional[str] = None
     api_server: HttpUrl
     namespace_target: Optional[str] = None
+    kubernetes_distribution: Optional[str] = Field(
+        default=None,
+        description="Distribución Kubernetes del clúster, por ejemplo kind, kubeadm, EKS, AKS o GKE.",
+    )
 
     connection_mode: str = Field(
         default="kubeconfig",
@@ -34,6 +38,7 @@ class ClusterRead(BaseModel):
     credential_reference: Optional[str]
     ca_certificate_fingerprint: Optional[str]
     kubernetes_version: Optional[str]
+    kubernetes_distribution: Optional[str]
     last_connection_status: Optional[str]
     last_connection_checked_at: Optional[datetime]
     registered_by_user_id: int

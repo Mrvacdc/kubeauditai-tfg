@@ -48,6 +48,11 @@ class Cluster(Base, TimestampMixin):
         nullable=True,
     )
 
+    kubernetes_distribution: Mapped[Optional[str]] = mapped_column(
+        String(80),
+        nullable=True,
+    )
+
     last_connection_status: Mapped[Optional[str]] = mapped_column(
         String(50),
         nullable=True,

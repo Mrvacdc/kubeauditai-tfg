@@ -111,7 +111,7 @@ def build_prompt_payload(finding: Finding) -> dict[str, Any]:
         "finding": {
             "finding_id": finding.id,
             "result": finding.result,
-            "evidence_sanitized": truncate_text(build_evidence_text(finding), 2500),
+            "evidence_sanitized": truncate_text(finding.evidence_sanitized or "", 2500),
         },
         "cis_control": {
             "code": getattr(control, "code", None),
@@ -128,7 +128,7 @@ def build_prompt_payload(finding: Finding) -> dict[str, Any]:
 def normalize_deepseek_response(
     data: dict[str, Any],
     finding: Finding,
-) -> dict[str, str]:
+) -> dict[str, str | None]:
     title = str(
         data.get("title")
         or f"Remediar control CIS {finding.control.code}"
@@ -160,12 +160,18 @@ def normalize_deepseek_response(
             f"Nota operacional:\n{operational_notes}"
         )
 
+    settings = get_settings()
+
     return {
         "title": title[:255],
         "recommendation_text": recommendation_text,
         "rationale": rationale or "Recomendación generada por IA a partir del resultado CIS y la evidencia sanitizada.",
         "priority": priority,
         "source": "deepseek",
+        "model_provider": "DeepSeek",
+        "model_name": settings.DEEPSEEK_MODEL,
+        "model_version": None,
+        "prompt_template": "kubeauditai-remediation-v1",
     }
 
 

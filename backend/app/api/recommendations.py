@@ -22,6 +22,7 @@ from app.services.recommendation_service import (
 
 router = APIRouter(prefix="/recommendations", tags=["Recommendations"])
 
+
 @router.post("/generate", response_model=RecommendationGenerateResponse)
 def generate_recommendations(
     request: Request,
@@ -84,7 +85,7 @@ def get_recommendations(
     )
 
 
-def build_recommendation_status_log_detail(
+def build_recommendation_review_log_detail(
     db: Session,
     recommendation_id: int,
     finding_id: int,
@@ -92,6 +93,7 @@ def build_recommendation_status_log_detail(
     new_status: str,
     source: str,
     priority: str,
+    reviewer_user_id: int,
 ) -> str:
     finding_context = (
         db.query(
@@ -104,29 +106,26 @@ def build_recommendation_status_log_detail(
         .first()
     )
 
+    base_detail = (
+        f"Recommendation review changed from {previous_status} "
+        f"to {new_status}; "
+        f"recommendation_id={recommendation_id}; "
+        f"finding_id={finding_id}; "
+        f"source={source}; "
+        f"priority={priority}; "
+        f"reviewer_user_id={reviewer_user_id}"
+    )
+
     if finding_context:
         control_code, control_title, finding_result = finding_context
-
         return (
-            f"Recommendation status changed from {previous_status} "
-            f"to {new_status}; "
-            f"recommendation_id={recommendation_id}; "
-            f"finding_id={finding_id}; "
-            f"source={source}; "
-            f"priority={priority}; "
+            f"{base_detail}; "
             f"control={control_code}; "
             f"result={finding_result}; "
             f"control_title={control_title}"
         )
 
-    return (
-        f"Recommendation status changed from {previous_status} "
-        f"to {new_status}; "
-        f"recommendation_id={recommendation_id}; "
-        f"finding_id={finding_id}; "
-        f"source={source}; "
-        f"priority={priority}"
-    )
+    return base_detail
 
 
 @router.patch("/{recommendation_id}/status", response_model=RecommendationRead)
@@ -150,13 +149,21 @@ def patch_recommendation_status(
             detail="Recommendation not found",
         )
 
-    previous_status = recommendation_before.status
+    previous_status = (
+        recommendation_before.review_status
+        or recommendation_before.status
+        or "PENDING"
+    )
 
     try:
         recommendation = update_recommendation_status(
             db=db,
             recommendation_id=recommendation_id,
             status=payload.status,
+            reviewer_user_id=current_user.id,
+            decision=payload.decision,
+            validation_evidence=payload.validation_evidence,
+            manual_recommendation=payload.manual_recommendation,
         )
     except RecommendationServiceError as exc:
         raise HTTPException(
@@ -166,25 +173,27 @@ def patch_recommendation_status(
 
     client_ip = request.client.host if request.client else None
     user_agent = request.headers.get("user-agent")
-    
-    log_detail = build_recommendation_status_log_detail(
+
+    log_detail = build_recommendation_review_log_detail(
         db=db,
         recommendation_id=recommendation.id,
         finding_id=recommendation.finding_id,
         previous_status=previous_status,
-        new_status=recommendation.status,
+        new_status=recommendation.review_status,
         source=recommendation.source,
         priority=recommendation.priority,
+        reviewer_user_id=current_user.id,
     )
 
     create_audit_log(
         db=db,
         user_id=current_user.id,
-        action="RECOMMENDATION_STATUS_UPDATED",
+        action="RECOMMENDATION_REVIEWED",
         entity_type="Recommendation",
         entity_id=str(recommendation_id),
         ip_address=client_ip,
         user_agent=user_agent,
         detail=log_detail,
     )
+
     return recommendation

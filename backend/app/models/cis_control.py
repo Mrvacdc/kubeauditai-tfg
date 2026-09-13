@@ -27,9 +27,13 @@ class CisControl(Base, TimestampMixin):
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     category: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-
-    severity: Mapped[Optional[str]] = mapped_column(
+    priority: Mapped[Optional[str]] = mapped_column(
         String(50),
+        nullable=True,
+    )
+
+    priority_source: Mapped[Optional[str]] = mapped_column(
+        String(255),
         nullable=True,
     )
 

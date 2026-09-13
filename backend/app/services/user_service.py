@@ -1,7 +1,12 @@
 from sqlalchemy.orm import Session
 
 from app.models.user import User
-from app.security.passwords import hash_password, verify_password
+from app.security.passwords import (
+    hash_password,
+    verify_password,
+    validate_password_policy,
+)
+
 
 
 def get_user_by_email(db: Session, email: str) -> User | None:
@@ -38,6 +43,8 @@ def create_user(
 
     if existing_user:
         raise ValueError("User already exists")
+
+    validate_password_policy(password)
 
     user = User(
         full_name=full_name,

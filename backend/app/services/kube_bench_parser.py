@@ -32,25 +32,45 @@ class ParsedAudit:
     failed_controls: int
     warning_controls: int
     compliance_percentage: Decimal
+    benchmark_version: str | None
+    detected_kubernetes_version: str | None
+    benchmark_profile: str | None
+    audit_scope: list[str]
     findings: list[ParsedFinding]
 
 
 SENSITIVE_PATTERNS = [
-    re.compile(r"Bearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE),
-    re.compile(r"token[:=]\s*[A-Za-z0-9._\-]+", re.IGNORECASE),
-    re.compile(r"password[:=]\s*\S+", re.IGNORECASE),
-    re.compile(r"secret[:=]\s*\S+", re.IGNORECASE),
-    re.compile(r"client-key-data[:=]\s*\S+", re.IGNORECASE),
-    re.compile(r"client-certificate-data[:=]\s*\S+", re.IGNORECASE),
-    re.compile(r"certificate-authority-data[:=]\s*\S+", re.IGNORECASE),
+    # Bloques PEM completos: deben evaluarse antes que patrones clave-valor.
     re.compile(
-        r"-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----.*?-----END\s+(?:RSA\s+)?PRIVATE\s+KEY-----",
+        r"-----BEGIN\s+[A-Z0-9 ]*PRIVATE\s+KEY-----.*?-----END\s+[A-Z0-9 ]*PRIVATE\s+KEY-----",
         re.IGNORECASE | re.DOTALL,
     ),
     re.compile(
         r"-----BEGIN\s+CERTIFICATE-----.*?-----END\s+CERTIFICATE-----",
         re.IGNORECASE | re.DOTALL,
     ),
+
+    # Tokens Bearer.
+    re.compile(r"Bearer\s+[A-Za-z0-9._\-]+", re.IGNORECASE),
+
+    # Secretos en formato clave-valor, incluyendo nombres compuestos.
+    # Ejemplos: aws_secret_access_key=..., api_key=..., client_secret=...
+    re.compile(
+        r"[A-Za-z0-9_.\-]*(?:token|password|passwd|secret|credential|api[_\-]?key|access[_\-]?key|private[_\-]?key|client[_\-]?secret)[A-Za-z0-9_.\-]*\s*[:=]\s*[^\s,;\"'}]+",
+        re.IGNORECASE,
+    ),
+
+    # Identificadores AWS Access Key ID, cuando aparecen como valor directo.
+    re.compile(r"AKIA[0-9A-Z]{16}", re.IGNORECASE),
+    re.compile(r"ASIA[0-9A-Z]{16}", re.IGNORECASE),
+
+    # Patrones específicos originales.
+    re.compile(r"token[:=]\s*[A-Za-z0-9._\-]+", re.IGNORECASE),
+    re.compile(r"password[:=]\s*\S+", re.IGNORECASE),
+    re.compile(r"secret[:=]\s*\S+", re.IGNORECASE),
+    re.compile(r"client-key-data[:=]\s*\S+", re.IGNORECASE),
+    re.compile(r"client-certificate-data[:=]\s*\S+", re.IGNORECASE),
+    re.compile(r"certificate-authority-data[:=]\s*\S+", re.IGNORECASE),
 ]
 
 
@@ -64,7 +84,10 @@ def sanitize_evidence(value: Any) -> str | None:
     if value is None:
         return None
 
-    text = str(value)
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    else:
+        text = str(value)
 
     for pattern in SENSITIVE_PATTERNS:
         text = pattern.sub("<REDACTED>", text)
@@ -112,6 +135,51 @@ def calculate_compliance_percentage(passed: int, total: int) -> Decimal:
 
     value = (Decimal(passed) / Decimal(total)) * Decimal(100)
     return value.quantize(Decimal("0.01"))
+
+
+def collapse_metadata_values(values: set[str]) -> str | None:
+    """
+    Normaliza un conjunto de valores de metadata de kube-bench.
+
+    Si hay un solo valor lo devuelve directamente. Si hay más de uno,
+    los conserva en una lista separada por comas para trazabilidad.
+    """
+    cleaned = sorted(
+        str(value).strip()
+        for value in values
+        if value is not None and str(value).strip()
+    )
+
+    if not cleaned:
+        return None
+
+    return ",".join(cleaned)
+
+
+def infer_scope_from_control(control_group: dict[str, Any]) -> str | None:
+    """
+    Determina el alcance o target evaluado a partir de la metadata del grupo
+    de controles de kube-bench.
+    """
+    node_type = control_group.get("node_type")
+    if node_type:
+        return str(node_type).strip()
+
+    text = str(control_group.get("text") or control_group.get("desc") or "").lower()
+
+    if "etcd" in text:
+        return "etcd"
+
+    if "control plane" in text:
+        return "controlplane"
+
+    if "worker" in text or "node" in text:
+        return "node"
+
+    if "policies" in text or "policy" in text:
+        return "policies"
+
+    return None
 
 
 def load_json_content(raw_content: bytes) -> dict[str, Any]:
@@ -163,7 +231,27 @@ def parse_kube_bench_json(raw_data: dict[str, Any]) -> ParsedAudit:
     failed = 0
     warnings = 0
 
+    benchmark_versions: set[str] = set()
+    detected_versions: set[str] = set()
+    audit_scope_values: set[str] = set()
+
     for control_group in controls:
+        if not isinstance(control_group, dict):
+            continue
+
+        version = control_group.get("version")
+        detected_version = control_group.get("detected_version")
+        scope_value = infer_scope_from_control(control_group)
+
+        if version:
+            benchmark_versions.add(str(version))
+
+        if detected_version:
+            detected_versions.add(str(detected_version))
+
+        if scope_value:
+            audit_scope_values.add(scope_value)
+
         group_text = control_group.get("text") or control_group.get("desc")
         tests = control_group.get("tests", [])
 
@@ -243,11 +331,19 @@ def parse_kube_bench_json(raw_data: dict[str, Any]) -> ParsedAudit:
         total=total,
     )
 
+    benchmark_version = collapse_metadata_values(benchmark_versions)
+    detected_kubernetes_version = collapse_metadata_values(detected_versions)
+    audit_scope = sorted(audit_scope_values)
+
     return ParsedAudit(
         total_controls=total,
         passed_controls=passed,
         failed_controls=failed,
         warning_controls=warnings,
         compliance_percentage=compliance_percentage,
+        benchmark_version=benchmark_version,
+        detected_kubernetes_version=detected_kubernetes_version,
+        benchmark_profile=benchmark_version,
+        audit_scope=audit_scope,
         findings=findings,
     )

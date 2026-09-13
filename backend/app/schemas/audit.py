@@ -12,8 +12,15 @@ class AuditRead(BaseModel):
     status: str
     execution_mode: str
     benchmark_version: Optional[str]
+    benchmark_profile: Optional[str]
+    kubernetes_version: Optional[str]
+    kubernetes_distribution: Optional[str]
+    kube_bench_version: Optional[str]
+    audit_scope: Optional[str]
     started_at: Optional[datetime]
     finished_at: Optional[datetime]
+    duration_seconds: Optional[int]
+    failure_reason: Optional[str]
     total_controls: int
     passed_controls: int
     failed_controls: int
@@ -49,7 +56,8 @@ class CisControlRead(BaseModel):
     title: str
     description: Optional[str]
     category: Optional[str]
-    severity: Optional[str]
+    priority: Optional[str]
+    priority_source: Optional[str]
     remediation_reference: Optional[str]
 
     model_config = {

@@ -1,26 +1,47 @@
+from datetime import datetime, timezone
+
 from sqlalchemy.orm import Session, joinedload
 
+from app.core.config import get_settings
 from app.models.audit import Audit
 from app.models.finding import Finding
 from app.models.recommendation import Recommendation
+from app.services.deepseek_service import (
+    DeepSeekRecommendationError,
+    generate_recommendation_with_deepseek,
+)
 from app.services.recommendation_engine import (
     build_rationale,
     build_recommendation_text,
     build_recommendation_title,
     infer_priority,
 )
-from app.core.config import get_settings
-from app.services.deepseek_service import (
-    DeepSeekRecommendationError,
-    generate_recommendation_with_deepseek,
-)
 
 
-VALID_RECOMMENDATION_STATUSES = {"PENDING", "APPLIED", "DISMISSED"}
+VALID_REVIEW_STATUSES = {"PENDING", "APPROVED", "REJECTED", "REPLACED"}
+FINAL_REVIEW_STATUSES = {"APPROVED", "REJECTED", "REPLACED"}
 
 
 class RecommendationServiceError(Exception):
     pass
+
+
+def normalize_review_status(status: str) -> str:
+    normalized = status.upper().strip()
+
+    legacy_mapping = {
+        "APPLIED": "APPROVED",
+        "DISMISSED": "REJECTED",
+    }
+
+    normalized = legacy_mapping.get(normalized, normalized)
+
+    if normalized not in VALID_REVIEW_STATUSES:
+        raise RecommendationServiceError(
+            f"Invalid status. Allowed values: {', '.join(sorted(VALID_REVIEW_STATUSES))}"
+        )
+
+    return normalized
 
 
 def generate_recommendations_for_audit(
@@ -32,9 +53,7 @@ def generate_recommendations_for_audit(
     """
     Genera recomendaciones para findings FAIL/WARN de una auditoría.
 
-    Es idempotente:
-    - Si ya existe recomendación para finding_id + source=rule_engine, la actualiza.
-    - Si no existe, la crea.
+    Si una recomendación ya fue revisada por una persona, no se sobrescribe.
     """
     audit = (
         db.query(Audit)
@@ -54,6 +73,7 @@ def generate_recommendations_for_audit(
         for finding in audit.findings
         if finding.result.upper() in {"FAIL", "WARN"}
     ]
+
     if limit is not None:
         if limit <= 0:
             raise RecommendationServiceError("Limit must be greater than 0")
@@ -67,11 +87,11 @@ def generate_recommendations_for_audit(
     for finding in findings_to_process:
         payload = build_recommendation_payload(finding, source=source)
 
-        title = payload["title"]
-        recommendation_text = payload["recommendation_text"]
-        rationale = payload["rationale"]
-        priority = payload["priority"]
-        recommendation_source = payload["source"]
+        title = str(payload["title"])
+        recommendation_text = str(payload["recommendation_text"])
+        rationale = payload.get("rationale")
+        priority = str(payload["priority"])
+        recommendation_source = str(payload["source"])
 
         existing = (
             db.query(Recommendation)
@@ -83,16 +103,30 @@ def generate_recommendations_for_audit(
         )
 
         if existing:
-            if existing.status in {"APPLIED", "DISMISSED"}:
+            existing_review_status = normalize_review_status(
+                existing.review_status or existing.status or "PENDING"
+            )
+
+            if existing_review_status in FINAL_REVIEW_STATUSES:
                 skipped += 1
                 recommendations.append(existing)
                 continue
 
             existing.title = title
             existing.recommendation_text = recommendation_text
-            existing.rationale = rationale
+            existing.rationale = str(rationale) if rationale else None
             existing.priority = priority
+            existing.review_status = "PENDING"
             existing.status = "PENDING"
+            existing.reviewed_by_user_id = None
+            existing.reviewed_at = None
+            existing.review_decision = None
+            existing.validation_evidence = None
+            existing.manual_recommendation = None
+            existing.model_provider = payload.get("model_provider")
+            existing.model_name = payload.get("model_name")
+            existing.model_version = payload.get("model_version")
+            existing.prompt_template = payload.get("prompt_template")
 
             db.add(existing)
             recommendations.append(existing)
@@ -103,16 +137,26 @@ def generate_recommendations_for_audit(
             finding_id=finding.id,
             title=title,
             recommendation_text=recommendation_text,
-            rationale=rationale,
+            rationale=str(rationale) if rationale else None,
             priority=priority,
             status="PENDING",
+            review_status="PENDING",
             source=recommendation_source,
+            reviewed_by_user_id=None,
+            reviewed_at=None,
+            review_decision=None,
+            validation_evidence=None,
+            manual_recommendation=None,
+            model_provider=payload.get("model_provider"),
+            model_name=payload.get("model_name"),
+            model_version=payload.get("model_version"),
+            prompt_template=payload.get("prompt_template"),
         )
 
         db.add(recommendation)
         recommendations.append(recommendation)
-        created += 1    
-        
+        created += 1
+
     db.commit()
 
     for recommendation in recommendations:
@@ -132,7 +176,9 @@ def list_recommendations(
         query = query.filter(Finding.audit_id == audit_id)
 
     if status is not None:
-        query = query.filter(Recommendation.status == status.upper())
+        query = query.filter(
+            Recommendation.review_status == normalize_review_status(status)
+        )
 
     return query.order_by(
         Recommendation.priority.asc(),
@@ -155,12 +201,39 @@ def update_recommendation_status(
     db: Session,
     recommendation_id: int,
     status: str,
+    reviewer_user_id: int,
+    decision: str | None = None,
+    validation_evidence: str | None = None,
+    manual_recommendation: str | None = None,
 ) -> Recommendation:
-    normalized_status = status.upper()
+    review_status = normalize_review_status(status)
 
-    if normalized_status not in VALID_RECOMMENDATION_STATUSES:
+    clean_decision = decision.strip() if decision else None
+    clean_validation_evidence = (
+        validation_evidence.strip() if validation_evidence else None
+    )
+    clean_manual_recommendation = (
+        manual_recommendation.strip() if manual_recommendation else None
+    )
+
+    if review_status == "REJECTED" and not clean_decision:
         raise RecommendationServiceError(
-            f"Invalid status. Allowed values: {', '.join(sorted(VALID_RECOMMENDATION_STATUSES))}"
+            "decision is required when status=REJECTED"
+        )
+
+    if review_status == "REPLACED":
+        if not clean_decision:
+            raise RecommendationServiceError(
+                "decision is required when status=REPLACED"
+            )
+        if not clean_manual_recommendation:
+            raise RecommendationServiceError(
+                "manual_recommendation is required when status=REPLACED"
+            )
+
+    if review_status == "APPROVED" and clean_manual_recommendation:
+        raise RecommendationServiceError(
+            "manual_recommendation must be empty when status=APPROVED"
         )
 
     recommendation = get_recommendation_by_id(
@@ -171,7 +244,18 @@ def update_recommendation_status(
     if not recommendation:
         raise RecommendationServiceError("Recommendation not found")
 
-    recommendation.status = normalized_status
+    recommendation.review_status = review_status
+
+    # Espejo de compatibilidad para dashboard/reportes existentes.
+    recommendation.status = review_status
+
+    recommendation.reviewed_by_user_id = reviewer_user_id
+    recommendation.reviewed_at = datetime.now(timezone.utc)
+    recommendation.review_decision = clean_decision
+    recommendation.validation_evidence = clean_validation_evidence
+    recommendation.manual_recommendation = (
+        clean_manual_recommendation if review_status == "REPLACED" else None
+    )
 
     db.add(recommendation)
     db.commit()
@@ -183,7 +267,7 @@ def update_recommendation_status(
 def build_recommendation_payload(
     finding: Finding,
     source: str = "auto",
-) -> dict[str, str]:
+) -> dict[str, str | None]:
     """
     Construye el payload de recomendación.
 
@@ -212,7 +296,6 @@ def build_recommendation_payload(
                 f"DeepSeek recommendation generation failed: {exc}"
             ) from exc
 
-    # source=auto
     provider = settings.AI_PROVIDER.lower()
 
     if provider == "deepseek":
@@ -227,11 +310,15 @@ def build_recommendation_payload(
     return build_rule_engine_payload(finding)
 
 
-def build_rule_engine_payload(finding: Finding) -> dict[str, str]:
+def build_rule_engine_payload(finding: Finding) -> dict[str, str | None]:
     return {
         "title": build_recommendation_title(finding)[:255],
         "recommendation_text": build_recommendation_text(finding),
         "rationale": build_rationale(finding),
         "priority": infer_priority(finding),
         "source": "rule_engine",
+        "model_provider": "KubeAuditAI",
+        "model_name": "internal_rule_engine",
+        "model_version": "1.0",
+        "prompt_template": None,
     }

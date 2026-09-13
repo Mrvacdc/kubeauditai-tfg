@@ -441,7 +441,7 @@ def get_audit_remediation_plan(
     }
 
 
-RESULT_SEVERITY = {
+RESULT_PRIORITY_RANK = {
     "PASS": 1,
     "WARN": 2,
     "FAIL": 3,
@@ -504,10 +504,10 @@ def get_control_results_for_audit(
             controls[row.control_code] = candidate
             continue
 
-        existing_severity = RESULT_SEVERITY.get(existing["result"], 0)
-        candidate_severity = RESULT_SEVERITY.get(result, 0)
+        existing_result_rank = RESULT_PRIORITY_RANK.get(existing["result"], 0)
+        candidate_result_rank = RESULT_PRIORITY_RANK.get(result, 0)
 
-        if candidate_severity > existing_severity:
+        if candidate_result_rank > existing_result_rank:
             controls[row.control_code] = candidate
 
     return controls
